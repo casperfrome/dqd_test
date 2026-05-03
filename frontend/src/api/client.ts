@@ -309,6 +309,10 @@ export const api = {
       method: "POST",
     });
   },
+  searchUsers(query: string) {
+    const params = new URLSearchParams({ q: query });
+    return request<UserBrief[]>(`/api/v1/users/search?${params}`);
+  },
   getUser(userId: number) {
     return request<UserProfile>(`/api/v1/users/${userId}`);
   },
@@ -462,6 +466,16 @@ export const api = {
   deactivateUser(userId: number) {
     return request<MessageResponse>(`/api/v1/admin/users/${userId}/deactivate`, {
       method: "POST",
+    });
+  },
+  deletePost(postId: number) {
+    return request<MessageResponse>(`/api/v1/posts/${postId}`, {
+      method: "DELETE",
+    });
+  },
+  deleteComment(commentId: number) {
+    return request<MessageResponse>(`/api/v1/comments/${commentId}`, {
+      method: "DELETE",
     });
   },
 };

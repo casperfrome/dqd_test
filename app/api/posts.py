@@ -14,7 +14,7 @@ from app.schemas.common import AnalyticsResponse, MessageResponse, PaginatedResp
 from app.schemas.posts import CommentResponse, CreateCommentRequest, PollVoteRequest, PostDetail
 from app.services.analytics import get_recent_post_events, record_post_event
 from app.services.comments import create_comment_with_path
-from app.services.permissions import ensure_active_user
+from app.services.permissions import ensure_active_user, ensure_circle_owner_or_admin
 
 
 router = APIRouter(prefix="/api/v1", tags=["posts"])
@@ -299,3 +299,36 @@ def get_post_analytics(post_id: int, connection: sqlite3.Connection = Depends(ge
         "is_locked": bool(post["is_locked"]),
     }
     return {"summary": summary, "recent_events": get_recent_post_events(connection, post_id)}
+
+
+@router.delete("/posts/{post_id}", response_model=MessageResponse)
+def delete_post(
+    post_id: int,
+    connection: sqlite3.Connection = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> MessageResponse:
+    ensure_active_user(current_user)
+    post = _get_post_or_404(connection, post_id)
+    if current_user["id"] != post["author_user_id"] and current_user["role"] != "super_admin":
+        circle = fan_circle_repo.get_fan_circle_by_id(connection, post["fan_circle_id"])
+        ensure_circle_owner_or_admin(current_user, circle)
+    post_repo.delete_post(connection, post_id)
+    return MessageResponse(message="Post deleted successfully.")
+
+
+@router.delete("/comments/{comment_id}", response_model=MessageResponse)
+def delete_comment(
+    comment_id: int,
+    connection: sqlite3.Connection = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> MessageResponse:
+    ensure_active_user(current_user)
+    comment = post_repo.get_comment_by_id(connection, comment_id)
+    if not comment:
+        raise AppError(status_code=404, message="Comment not found.")
+    if current_user["id"] != comment["author_user_id"] and current_user["role"] != "super_admin":
+        post = _get_post_or_404(connection, comment["post_id"])
+        circle = fan_circle_repo.get_fan_circle_by_id(connection, post["fan_circle_id"])
+        ensure_circle_owner_or_admin(current_user, circle)
+    post_repo.delete_comment(connection, comment_id)
+    return MessageResponse(message="Comment deleted successfully.")

@@ -16,6 +16,15 @@ from app.services.permissions import ensure_active_user
 router = APIRouter(prefix="/api/v1/users", tags=["users"])
 
 
+@router.get("/search", response_model=list[UserBrief])
+def search_users(
+    q: str = Query(min_length=1, max_length=64),
+    connection: sqlite3.Connection = Depends(get_db),
+) -> list[dict]:
+    users = user_repo.search_users(connection, q, limit=10)
+    return [serialize_user_brief(u) for u in users]
+
+
 @router.get("/{user_id}", response_model=UserProfile)
 def get_user_profile(
     user_id: int,

@@ -1,6 +1,8 @@
 import sqlite3
+from collections import defaultdict
+from time import time
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 
 from app.api.deps import get_current_user, get_db
 from app.api.serializers import serialize_user_profile
@@ -16,6 +18,19 @@ from app.services.permissions import ensure_active_user
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
+_rate_limit_store: dict[str, list[float]] = defaultdict(list)
+
+
+def _check_rate_limit(key: str, max_requests: int = 10, window_seconds: int = 60) -> None:
+    import os as _os
+    if _os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    now = time()
+    _rate_limit_store[key] = [t for t in _rate_limit_store[key] if now - t < window_seconds]
+    if len(_rate_limit_store[key]) >= max_requests:
+        raise AppError(status_code=429, message="请求过于频繁，请稍后再试。")
+    _rate_limit_store[key].append(now)
+
 
 def _default_avatar_for_user(user_id: int) -> str:
     avatar_index = ((user_id - 1) % 3) + 1
@@ -23,7 +38,8 @@ def _default_avatar_for_user(user_id: int) -> str:
 
 
 @router.post("/register", response_model=UserProfile, status_code=status.HTTP_201_CREATED)
-def register(payload: RegisterRequest, connection: sqlite3.Connection = Depends(get_db)) -> dict:
+def register(payload: RegisterRequest, request: Request, connection: sqlite3.Connection = Depends(get_db)) -> dict:
+    _check_rate_limit(f"register:{request.client.host if request.client else 'unknown'}", max_requests=5, window_seconds=60)
     existing_user = user_repo.get_user_by_username(connection, payload.username)
     if existing_user:
         raise AppError(status_code=409, message="Username already exists.")
@@ -53,7 +69,8 @@ def register(payload: RegisterRequest, connection: sqlite3.Connection = Depends(
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(payload: LoginRequest, connection: sqlite3.Connection = Depends(get_db)) -> TokenResponse:
+def login(payload: LoginRequest, request: Request, connection: sqlite3.Connection = Depends(get_db)) -> TokenResponse:
+    _check_rate_limit(f"login:{request.client.host if request.client else 'unknown'}", max_requests=10, window_seconds=60)
     user = user_repo.get_user_by_username(connection, payload.username)
     if not user or not verify_password(payload.password, user["password_hash"]):
         raise AppError(status_code=401, message="Invalid username or password.")

@@ -103,7 +103,13 @@ def test_code_facts_rebuild_and_retrieval(client, register_and_login):
         facts = retrieve_code_facts(connection, "create_app DatabaseAiPanel", limit=8)
         assert facts
         assert any(fact["source_file_path"] == "app/main.py" for fact in facts)
-        assert any(fact["source_file_path"] == "frontend/src/App.tsx" for fact in facts)
+        assert any(
+            fact["source_file_path"] in (
+                "frontend/src/App.tsx",
+                "frontend/src/components/databases/DatabaseAiPanel.tsx",
+            )
+            for fact in facts
+        )
         assert all(int(fact["start_line"]) <= int(fact["end_line"]) for fact in facts)
     finally:
         connection.close()

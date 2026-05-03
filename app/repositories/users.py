@@ -34,6 +34,20 @@ def get_user_by_username(connection: sqlite3.Connection, username: str) -> dict[
     return fetch_one_dict(connection, "SELECT * FROM users WHERE username = ?", (username,))
 
 
+def search_users(connection: sqlite3.Connection, query: str, limit: int = 10) -> list[dict[str, Any]]:
+    like = f"%{query}%"
+    return fetch_all_dicts(
+        connection,
+        """
+        SELECT * FROM users
+        WHERE username LIKE ? OR nickname LIKE ?
+        ORDER BY id ASC
+        LIMIT ?
+        """,
+        (like, like, limit),
+    )
+
+
 def list_followers(connection: sqlite3.Connection, user_id: int, *, limit: int, offset: int) -> list[dict[str, Any]]:
     return fetch_all_dicts(
         connection,

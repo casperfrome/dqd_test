@@ -82,8 +82,21 @@ def list_posts_by_circle(
         """,
         (fan_circle_id, limit, offset),
     )
-    for post in posts:
-        post["tags"] = get_post_tags(connection, post["id"])
+    post_ids = [p["id"] for p in posts]
+    if post_ids:
+        placeholders = ",".join("?" for _ in post_ids)
+        tag_rows = connection.execute(
+            f"SELECT post_id, tag_name FROM post_tags WHERE post_id IN ({placeholders}) ORDER BY id ASC",
+            post_ids,
+        ).fetchall()
+        tags_by_post: dict[int, list[str]] = {}
+        for row in tag_rows:
+            tags_by_post.setdefault(int(row["post_id"]), []).append(row["tag_name"])
+        for post in posts:
+            post["tags"] = tags_by_post.get(int(post["id"]), [])
+    else:
+        for post in posts:
+            post["tags"] = []
     return posts
 
 
@@ -340,3 +353,35 @@ def record_poll_vote(connection: sqlite3.Connection, poll_id: int, option_id: in
         "UPDATE post_poll_options SET vote_count = vote_count + 1 WHERE id = ?",
         (option_id,),
     )
+
+
+def delete_post(connection: sqlite3.Connection, post_id: int) -> bool:
+    row = connection.execute("SELECT id FROM posts WHERE id = ?", (post_id,)).fetchone()
+    if not row:
+        return False
+    connection.execute("DELETE FROM post_events WHERE post_id = ?", (post_id,))
+    poll = connection.execute("SELECT id FROM post_polls WHERE post_id = ?", (post_id,)).fetchone()
+    if poll:
+        connection.execute("DELETE FROM post_poll_votes WHERE poll_id = ?", (poll["id"],))
+        connection.execute("DELETE FROM post_poll_options WHERE poll_id = ?", (poll["id"],))
+        connection.execute("DELETE FROM post_polls WHERE id = ?", (poll["id"],))
+    connection.execute("DELETE FROM post_tags WHERE post_id = ?", (post_id,))
+    connection.execute("DELETE FROM comments WHERE post_id = ?", (post_id,))
+    connection.execute("DELETE FROM posts WHERE id = ?", (post_id,))
+    return True
+
+
+def delete_comment(connection: sqlite3.Connection, comment_id: int) -> dict[str, Any] | None:
+    comment = get_comment_by_id(connection, comment_id)
+    if not comment:
+        return None
+    connection.execute(
+        "DELETE FROM comments WHERE path LIKE ?",
+        (f"{comment['path']}/%",),
+    )
+    connection.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
+    connection.execute(
+        "UPDATE posts SET comment_count = MAX(comment_count - 1, 0), updated_at = ? WHERE id = ?",
+        (comment.get("updated_at", ""), comment["post_id"]),
+    )
+    return comment
