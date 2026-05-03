@@ -1,0 +1,1 @@
+"""FootballDomain application package."""
