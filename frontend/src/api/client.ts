@@ -161,6 +161,7 @@ async function requestSse<TEvent extends DatabaseAiStreamEvent | CodeAiStreamEve
   path: string,
   options: RequestInit,
   onEvent: (event: TEvent) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const headers = new Headers(options.headers);
   const token = getStoredToken();
@@ -174,6 +175,7 @@ async function requestSse<TEvent extends DatabaseAiStreamEvent | CodeAiStreamEve
   const response = await fetch(path, {
     ...options,
     headers,
+    signal,
   });
 
   if (!response.ok) {
@@ -193,7 +195,7 @@ async function requestSse<TEvent extends DatabaseAiStreamEvent | CodeAiStreamEve
 
   while (true) {
     const { done, value } = await reader.read();
-    if (done) {
+    if (done || signal?.aborted) {
       break;
     }
     buffer += decoder.decode(value, { stream: true });
@@ -358,7 +360,11 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
-  streamDatabaseAiChat(payload: DatabaseAiChatRequest, onEvent: (event: DatabaseAiStreamEvent) => void) {
+  streamDatabaseAiChat(
+    payload: DatabaseAiChatRequest,
+    onEvent: (event: DatabaseAiStreamEvent) => void,
+    signal?: AbortSignal,
+  ) {
     return requestSse(
       "/api/v1/databases/ai/chat",
       {
@@ -367,6 +373,7 @@ export const api = {
         body: JSON.stringify(payload),
       },
       onEvent,
+      signal,
     );
   },
   listDatabaseAiSessions() {
@@ -400,7 +407,11 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
-  streamCodeAiChat(payload: CodeAiChatRequest, onEvent: (event: CodeAiStreamEvent) => void) {
+  streamCodeAiChat(
+    payload: CodeAiChatRequest,
+    onEvent: (event: CodeAiStreamEvent) => void,
+    signal?: AbortSignal,
+  ) {
     return requestSse<CodeAiStreamEvent>(
       "/api/v1/code/ai/chat",
       {
@@ -409,6 +420,7 @@ export const api = {
         body: JSON.stringify(payload),
       },
       onEvent,
+      signal,
     );
   },
   listCodeAiSessions() {
