@@ -275,6 +275,11 @@ select:focus {
   color: white;
 }
 
+.danger:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .icon-button {
   width: 40px;
   padding: 0;

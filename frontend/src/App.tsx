@@ -2048,7 +2048,6 @@ function CodeAiPanel({
     setAiError(null);
     setAiStatus(null);
   };
-}
 
   const checkHealth = async () => {
     setAiError(null);
@@ -2182,12 +2181,10 @@ function CodeAiPanel({
               {busy ? <RefreshCw size={17} /> : <Send size={17} />}
               {busy ? "思考中" : "发送"}
             </button>
-            {busy && (
-              <button className="danger" type="button" onClick={handleStop}>
-                <Square size={17} />
-                暂停生成
-              </button>
-            )}
+            <button className="danger" type="button" onClick={handleStop} disabled={!busy}>
+              <Square size={17} />
+              暂停生成
+            </button>
           </form>
         </div>
       </div>
@@ -2782,12 +2779,10 @@ function DatabaseAiPanel({ currentUser }: { currentUser: UserProfile | null }) {
               {busy ? <RefreshCw size={17} /> : <Send size={17} />}
               {busy ? "思考中" : "发送"}
             </button>
-            {busy && (
-              <button className="danger" type="button" onClick={handleStop}>
-                <Square size={17} />
-                暂停生成
-              </button>
-            )}
+            <button className="danger" type="button" onClick={handleStop} disabled={!busy}>
+              <Square size={17} />
+              暂停生成
+            </button>
           </form>
         </div>
       </div>
