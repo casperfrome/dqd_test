@@ -196,6 +196,7 @@ CREATE TABLE IF NOT EXISTS ai_chat_messages (
     thinking_content TEXT NOT NULL DEFAULT '',
     input_token_count INTEGER NOT NULL DEFAULT 0,
     output_token_count INTEGER NOT NULL DEFAULT 0,
+    is_stopped INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     FOREIGN KEY (session_id) REFERENCES ai_chat_sessions(id)
 );
@@ -259,6 +260,7 @@ CREATE TABLE IF NOT EXISTS ai_code_chat_messages (
     thinking_content TEXT NOT NULL DEFAULT '',
     input_token_count INTEGER NOT NULL DEFAULT 0,
     output_token_count INTEGER NOT NULL DEFAULT 0,
+    is_stopped INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     FOREIGN KEY (session_id) REFERENCES ai_code_chat_sessions(id)
 );

@@ -89,6 +89,10 @@ class DatabaseAiSource(BaseSchema):
     score: float | None = None
 
 
+class DatabaseAiStopRequest(BaseSchema):
+    stream_id: str = Field(min_length=1)
+
+
 class DatabaseAiChatResponse(BaseSchema):
     session_id: str
     user_message_id: int
@@ -112,6 +116,7 @@ class DatabaseAiMessage(BaseSchema):
     thinking_content: str
     input_token_count: int
     output_token_count: int
+    is_stopped: bool = False
     retrieved_fact_ids: list[int]
     sources: list[DatabaseAiSource]
     created_at: str

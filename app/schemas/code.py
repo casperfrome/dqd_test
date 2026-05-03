@@ -35,6 +35,10 @@ class CodeFileResponse(CodeFileInfo):
     content: str
 
 
+class CodeAiStopRequest(BaseSchema):
+    stream_id: str = Field(min_length=1)
+
+
 class CodeAiChatRequest(BaseSchema):
     question: str = Field(min_length=1, max_length=2000)
     session_id: str | None = None
@@ -75,6 +79,7 @@ class CodeAiMessage(BaseSchema):
     thinking_content: str
     input_token_count: int
     output_token_count: int
+    is_stopped: bool = False
     retrieved_fact_ids: list[int]
     sources: list[CodeAiSource]
     created_at: str

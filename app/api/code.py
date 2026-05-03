@@ -18,11 +18,13 @@ from app.schemas.code import (
     CodeAiHealthResponse,
     CodeAiSessionDetail,
     CodeAiSessionSummary,
+    CodeAiStopRequest,
     CodeCatalogResponse,
     CodeFileResponse,
 )
 from app.services import code_ai
 from app.services.code_catalog import inspect_code_catalog, read_code_file
+from app.services.stream_stop import signal_stop
 from app.services.permissions import ensure_active_user, ensure_super_admin
 
 
@@ -107,6 +109,12 @@ def chat_with_code_ai(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/ai/chat/stop")
+def stop_code_ai_chat(payload: CodeAiStopRequest) -> dict:
+    found = signal_stop(payload.stream_id)
+    return {"ok": found}
 
 
 @router.post("/ai/chat/complete", response_model=CodeAiChatResponse)

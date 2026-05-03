@@ -4,6 +4,7 @@ import type {
   CodeAiChatResponse,
   CodeAiSessionDetail,
   CodeAiSessionSummary,
+  CodeAiStopRequest,
   CodeAiStreamEvent,
   CodeCatalogResponse,
   CodeFileResponse,
@@ -18,6 +19,7 @@ import type {
   DatabaseAiHealthResponse,
   DatabaseAiSessionDetail,
   DatabaseAiSessionSummary,
+  DatabaseAiStopRequest,
   DatabaseAiStreamEvent,
   DatabaseCatalogResponse,
   FanCircleDetail,
@@ -159,7 +161,7 @@ function parseSseBlock(block: string): DatabaseAiStreamEvent | null {
 
 async function requestSse<TEvent extends DatabaseAiStreamEvent | CodeAiStreamEvent>(
   path: string,
-  options: RequestInit,
+  options: RequestInit & { signal?: AbortSignal },
   onEvent: (event: TEvent) => void,
 ): Promise<void> {
   const headers = new Headers(options.headers);
@@ -171,10 +173,18 @@ async function requestSse<TEvent extends DatabaseAiStreamEvent | CodeAiStreamEve
     headers.set("Authorization", `Bearer ${token}`);
   }
 
-  const response = await fetch(path, {
-    ...options,
-    headers,
-  });
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      ...options,
+      headers,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      return;
+    }
+    throw error;
+  }
 
   if (!response.ok) {
     const message = await parseError(response);
@@ -358,13 +368,14 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
-  streamDatabaseAiChat(payload: DatabaseAiChatRequest, onEvent: (event: DatabaseAiStreamEvent) => void) {
+  streamDatabaseAiChat(payload: DatabaseAiChatRequest, onEvent: (event: DatabaseAiStreamEvent) => void, signal?: AbortSignal) {
     return requestSse(
       "/api/v1/databases/ai/chat",
       {
         method: "POST",
         headers: { "X-AI-Client-Id": getAiClientId() },
         body: JSON.stringify(payload),
+        signal,
       },
       onEvent,
     );
@@ -384,6 +395,12 @@ export const api = {
       method: "POST",
     });
   },
+  stopDatabaseAiChat(payload: DatabaseAiStopRequest) {
+    return request<{ ok: boolean }>("/api/v1/databases/ai/chat/stop", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
   getDatabaseAiHealth() {
     return request<DatabaseAiHealthResponse>("/api/v1/databases/ai/health");
   },
@@ -400,13 +417,14 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
-  streamCodeAiChat(payload: CodeAiChatRequest, onEvent: (event: CodeAiStreamEvent) => void) {
+  streamCodeAiChat(payload: CodeAiChatRequest, onEvent: (event: CodeAiStreamEvent) => void, signal?: AbortSignal) {
     return requestSse<CodeAiStreamEvent>(
       "/api/v1/code/ai/chat",
       {
         method: "POST",
         headers: { "X-AI-Client-Id": getAiClientId() },
         body: JSON.stringify(payload),
+        signal,
       },
       onEvent,
     );
@@ -424,6 +442,12 @@ export const api = {
   rebuildCodeAiFacts() {
     return request<DatabaseAiFactsRebuildResponse>("/api/v1/code/ai/facts/rebuild", {
       method: "POST",
+    });
+  },
+  stopCodeAiChat(payload: CodeAiStopRequest) {
+    return request<{ ok: boolean }>("/api/v1/code/ai/chat/stop", {
+      method: "POST",
+      body: JSON.stringify(payload),
     });
   },
   getCodeAiHealth() {

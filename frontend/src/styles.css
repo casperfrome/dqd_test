@@ -1177,9 +1177,16 @@ select:focus {
 
 .ai-chat-form {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 10px;
   align-items: end;
+}
+
+.ai-message-stopped {
+  color: #d97706;
+  font-size: 12px;
+  font-weight: 700;
+  margin-top: 4px;
 }
 
 .ai-thinking-toggle {

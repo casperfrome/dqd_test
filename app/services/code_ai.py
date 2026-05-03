@@ -15,7 +15,8 @@ from app.core.utils import utc_now_iso
 from app.db.connection import create_connection
 from app.repositories import ai_code as ai_repo
 from app.services.code_catalog import list_code_files, read_code_file
-from app.services.ollama_client import OllamaError, chat_with_ollama, get_ollama_health, stream_chat_with_ollama
+from app.services.ollama_client import OllamaError, StreamInterrupted, chat_with_ollama, get_ollama_health, stream_chat_with_ollama
+from app.services.stream_stop import register_stream, unregister_stream
 
 
 CHUNK_LINE_COUNT = 120
@@ -166,6 +167,8 @@ def stream_code_question_events(
     fact_ids: list[int] = []
     input_token_count = 0
     output_token_count = 0
+    stream_id = str(uuid.uuid4())
+    stop_event = register_stream(stream_id)
     try:
         normalized_question = question.strip()
         if not normalized_question:
@@ -200,6 +203,7 @@ def stream_code_question_events(
                 "session_id": session["public_id"],
                 "user_message_id": user_message["id"],
                 "thinking_enabled": thinking_enabled,
+                "stream_id": stream_id,
             },
         )
         yield sse_event("sources", {"sources": sources})
@@ -212,6 +216,7 @@ def stream_code_question_events(
             system_prompt=SYSTEM_PROMPT,
             user_prompt=_build_user_prompt(normalized_question, facts),
             thinking_enabled=thinking_enabled,
+            stop_event=stop_event,
         ):
             if event["type"] == "thinking_delta":
                 thinking_parts.append(str(event["delta"]))
@@ -267,6 +272,47 @@ def stream_code_question_events(
                 "sources": sources,
             },
         )
+    except StreamInterrupted:
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        answer = "".join(answer_parts).strip()
+        thinking_content = "".join(thinking_parts).strip() if thinking_enabled else ""
+        assistant_message = ai_repo.insert_message(
+            connection,
+            session_id=int(session["id"]),
+            role="assistant",
+            content=answer,
+            retrieved_fact_ids=fact_ids,
+            thinking_enabled=thinking_enabled,
+            thinking_content=thinking_content,
+            input_token_count=input_token_count,
+            output_token_count=output_token_count,
+            is_stopped=1,
+            created_at=utc_now_iso(),
+        )
+        ai_repo.insert_event(
+            connection,
+            event_type="chat_completion",
+            session_id=int(session["id"]),
+            message_id=int(assistant_message["id"]),
+            actor_user_id=owner_user_id,
+            model=settings.ai_chat_model,
+            retrieved_fact_ids=fact_ids,
+            thinking_enabled=thinking_enabled,
+            input_token_count=input_token_count,
+            output_token_count=output_token_count,
+            duration_ms=duration_ms,
+            status="interrupted",
+            error_message="User stopped generation",
+            created_at=utc_now_iso(),
+        )
+        connection.commit()
+        yield sse_event(
+            "interrupted",
+            {
+                "session_id": session["public_id"],
+                "assistant_message_id": assistant_message["id"],
+            },
+        )
     except (AppError, OllamaError) as exc:
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         if session is not None and user_message is not None:
@@ -294,6 +340,7 @@ def stream_code_question_events(
         connection.rollback()
         yield sse_event("error", {"message": f"AI streaming chat failed: {exc}"})
     finally:
+        unregister_stream(stream_id)
         connection.close()
 
 
@@ -350,6 +397,7 @@ def get_chat_session_detail(
                 "thinking_content": message["thinking_content"],
                 "input_token_count": message["input_token_count"],
                 "output_token_count": message["output_token_count"],
+                "is_stopped": message["is_stopped"],
                 "retrieved_fact_ids": message["retrieved_fact_ids"],
                 "sources": [_source_from_fact(fact) for fact in facts],
                 "created_at": message["created_at"],

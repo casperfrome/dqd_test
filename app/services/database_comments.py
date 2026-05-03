@@ -183,6 +183,7 @@ COLUMN_COMMENTS: dict[str, dict[str, str]] = {
         "thinking_content": "模型返回的深度思考内容。",
         "input_token_count": "本轮模型调用输入 token 数。",
         "output_token_count": "本轮模型调用输出 token 数。",
+        "is_stopped": "消息是否被用户手动停止生成，1 表示已停止。",
         "created_at": "消息创建时间。",
     },
     "ai_chat_events": {
@@ -239,6 +240,7 @@ COLUMN_COMMENTS: dict[str, dict[str, str]] = {
         "thinking_content": "模型返回的深度思考内容。",
         "input_token_count": "本轮模型调用输入 token 数。",
         "output_token_count": "本轮模型调用输出 token 数。",
+        "is_stopped": "消息是否被用户手动停止生成，1 表示已停止。",
         "created_at": "消息创建时间。",
     },
     "ai_code_chat_events": {

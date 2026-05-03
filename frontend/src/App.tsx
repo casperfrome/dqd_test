@@ -24,6 +24,7 @@ import {
   Send,
   Shield,
   Sparkles,
+  Square,
   ThumbsDown,
   ThumbsUp,
   Unlock,
@@ -31,7 +32,7 @@ import {
   Vote,
   X,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -1827,6 +1828,8 @@ function CodeAiPanel({
   const [question, setQuestion] = useState("");
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const streamIdRef = useRef<string | null>(null);
   const [loadingSession, setLoadingSession] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiStatus, setAiStatus] = useState<string | null>(null);
@@ -1871,6 +1874,9 @@ function CodeAiPanel({
     if (!trimmed || busy) {
       return;
     }
+    const controller = new AbortController();
+    abortRef.current = controller;
+    streamIdRef.current = null;
     setBusy(true);
     setAiError(null);
     setAiStatus(null);
@@ -1889,6 +1895,7 @@ function CodeAiPanel({
         thinking_content: "",
         input_token_count: 0,
         output_token_count: 0,
+        is_stopped: false,
         retrieved_fact_ids: [],
         sources: [],
         created_at: createdAt,
@@ -1909,6 +1916,7 @@ function CodeAiPanel({
                 thinking_content: "",
                 input_token_count: 0,
                 output_token_count: 0,
+                is_stopped: false,
                 retrieved_fact_ids: [],
                 sources: latestSources,
                 created_at: new Date().toISOString(),
@@ -1926,6 +1934,7 @@ function CodeAiPanel({
         },
         (streamEvent) => {
           if (streamEvent.event === "session") {
+            streamIdRef.current = streamEvent.data.stream_id;
             setSelectedSessionId(streamEvent.data.session_id);
             setMessages((items) =>
               items.map((message) =>
@@ -1989,11 +1998,22 @@ function CodeAiPanel({
               ),
             );
           }
+          if (streamEvent.event === "interrupted") {
+            setAiStatus("生成已停止。");
+            setMessages((items) =>
+              items.map((message) =>
+                message.id === assistantTempId
+                  ? { ...message, id: streamEvent.data.assistant_message_id, is_stopped: true }
+                  : message,
+              ),
+            );
+          }
           if (streamEvent.event === "error") {
             streamError = streamEvent.data.message;
             setAiError(streamEvent.data.message);
           }
         },
+        controller.signal,
       );
       if (!streamError) {
         setAiStatus("回答已完成。");
@@ -2004,6 +2024,21 @@ function CodeAiPanel({
       setAiError(getErrorMessage(error));
     } finally {
       setBusy(false);
+      abortRef.current = null;
+      streamIdRef.current = null;
+    }
+    if (controller.signal.aborted) {
+      setAiStatus("生成已停止。");
+    }
+  };
+
+  const handleStop = () => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+    }
+    const streamId = streamIdRef.current;
+    if (streamId) {
+      api.stopCodeAiChat({ stream_id: streamId }).catch(() => {});
     }
   };
 
@@ -2013,6 +2048,7 @@ function CodeAiPanel({
     setAiError(null);
     setAiStatus(null);
   };
+}
 
   const checkHealth = async () => {
     setAiError(null);
@@ -2112,6 +2148,7 @@ function CodeAiPanel({
                       输入 {message.input_token_count} · 输出 {message.output_token_count}
                     </div>
                   )}
+                {message.is_stopped && <div className="ai-message-stopped">已停止生成</div>}
                 {message.sources.length > 0 && <CodeSources sources={message.sources} onOpenSource={onOpenSource} />}
               </div>
             ))}
@@ -2145,6 +2182,12 @@ function CodeAiPanel({
               {busy ? <RefreshCw size={17} /> : <Send size={17} />}
               {busy ? "思考中" : "发送"}
             </button>
+            {busy && (
+              <button className="danger" type="button" onClick={handleStop}>
+                <Square size={17} />
+                暂停生成
+              </button>
+            )}
           </form>
         </div>
       </div>
@@ -2386,6 +2429,8 @@ function DatabaseAiPanel({ currentUser }: { currentUser: UserProfile | null }) {
   const [question, setQuestion] = useState("");
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const streamIdRef = useRef<string | null>(null);
   const [loadingSession, setLoadingSession] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiStatus, setAiStatus] = useState<string | null>(null);
@@ -2430,6 +2475,9 @@ function DatabaseAiPanel({ currentUser }: { currentUser: UserProfile | null }) {
     if (!trimmed || busy) {
       return;
     }
+    const controller = new AbortController();
+    abortRef.current = controller;
+    streamIdRef.current = null;
     setBusy(true);
     setAiError(null);
     setAiStatus(null);
@@ -2448,6 +2496,7 @@ function DatabaseAiPanel({ currentUser }: { currentUser: UserProfile | null }) {
         thinking_content: "",
         input_token_count: 0,
         output_token_count: 0,
+        is_stopped: false,
         retrieved_fact_ids: [],
         sources: [],
         created_at: createdAt,
@@ -2468,6 +2517,7 @@ function DatabaseAiPanel({ currentUser }: { currentUser: UserProfile | null }) {
                 thinking_content: "",
                 input_token_count: 0,
                 output_token_count: 0,
+                is_stopped: false,
                 retrieved_fact_ids: [],
                 sources: latestSources,
                 created_at: new Date().toISOString(),
@@ -2485,6 +2535,7 @@ function DatabaseAiPanel({ currentUser }: { currentUser: UserProfile | null }) {
         },
         (streamEvent) => {
           if (streamEvent.event === "session") {
+            streamIdRef.current = streamEvent.data.stream_id;
             setSelectedSessionId(streamEvent.data.session_id);
             setMessages((items) =>
               items.map((message) =>
@@ -2548,11 +2599,22 @@ function DatabaseAiPanel({ currentUser }: { currentUser: UserProfile | null }) {
               ),
             );
           }
+          if (streamEvent.event === "interrupted") {
+            setAiStatus("生成已停止。");
+            setMessages((items) =>
+              items.map((message) =>
+                message.id === assistantTempId
+                  ? { ...message, id: streamEvent.data.assistant_message_id, is_stopped: true }
+                  : message,
+              ),
+            );
+          }
           if (streamEvent.event === "error") {
             streamError = streamEvent.data.message;
             setAiError(streamEvent.data.message);
           }
         },
+        controller.signal,
       );
       if (!streamError) {
         setAiStatus("回答已完成。");
@@ -2563,6 +2625,21 @@ function DatabaseAiPanel({ currentUser }: { currentUser: UserProfile | null }) {
       setAiError(getErrorMessage(error));
     } finally {
       setBusy(false);
+      abortRef.current = null;
+      streamIdRef.current = null;
+    }
+    if (controller.signal.aborted) {
+      setAiStatus("生成已停止。");
+    }
+  };
+
+  const handleStop = () => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+    }
+    const streamId = streamIdRef.current;
+    if (streamId) {
+      api.stopDatabaseAiChat({ stream_id: streamId }).catch(() => {});
     }
   };
 
@@ -2671,6 +2748,7 @@ function DatabaseAiPanel({ currentUser }: { currentUser: UserProfile | null }) {
                       输入 {message.input_token_count} · 输出 {message.output_token_count}
                     </div>
                   )}
+                {message.is_stopped && <div className="ai-message-stopped">已停止生成</div>}
                 {message.sources.length > 0 && <AiSources sources={message.sources} />}
               </div>
             ))}
@@ -2704,6 +2782,12 @@ function DatabaseAiPanel({ currentUser }: { currentUser: UserProfile | null }) {
               {busy ? <RefreshCw size={17} /> : <Send size={17} />}
               {busy ? "思考中" : "发送"}
             </button>
+            {busy && (
+              <button className="danger" type="button" onClick={handleStop}>
+                <Square size={17} />
+                暂停生成
+              </button>
+            )}
           </form>
         </div>
       </div>

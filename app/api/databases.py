@@ -21,9 +21,11 @@ from app.schemas.databases import (
     DatabaseAiHealthResponse,
     DatabaseAiSessionDetail,
     DatabaseAiSessionSummary,
+    DatabaseAiStopRequest,
     DatabaseCatalogResponse,
 )
 from app.services import database_ai
+from app.services.stream_stop import signal_stop
 from app.services.database_catalog import inspect_databases
 from app.services.permissions import ensure_active_user, ensure_super_admin
 
@@ -115,6 +117,12 @@ def chat_with_database_ai(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/ai/chat/stop")
+def stop_database_ai_chat(payload: DatabaseAiStopRequest) -> dict:
+    found = signal_stop(payload.stream_id)
+    return {"ok": found}
 
 
 @router.post("/ai/chat/complete", response_model=DatabaseAiChatResponse)

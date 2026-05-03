@@ -30,6 +30,8 @@ def _run_lightweight_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "ai_chat_events", "thinking_enabled", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "ai_chat_events", "input_token_count", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "ai_chat_events", "output_token_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(connection, "ai_chat_messages", "is_stopped", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(connection, "ai_code_chat_messages", "is_stopped", "INTEGER NOT NULL DEFAULT 0")
 
 
 def initialize_database(settings: Settings) -> None:

@@ -217,6 +217,7 @@ def insert_message(
     thinking_content: str = "",
     input_token_count: int = 0,
     output_token_count: int = 0,
+    is_stopped: int = 0,
     created_at: str,
 ) -> dict[str, Any]:
     cursor = connection.execute(
@@ -230,8 +231,9 @@ def insert_message(
             thinking_content,
             input_token_count,
             output_token_count,
+            is_stopped,
             created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             session_id,
@@ -242,6 +244,7 @@ def insert_message(
             thinking_content,
             input_token_count,
             output_token_count,
+            is_stopped,
             created_at,
         ),
     )
@@ -332,4 +335,5 @@ def _decode_metadata(row: dict[str, Any]) -> dict[str, Any]:
 def _decode_message(row: dict[str, Any]) -> dict[str, Any]:
     row["retrieved_fact_ids"] = json.loads(str(row.pop("retrieved_fact_ids_json") or "[]"))
     row["thinking_enabled"] = bool(row["thinking_enabled"])
+    row["is_stopped"] = bool(row["is_stopped"])
     return row

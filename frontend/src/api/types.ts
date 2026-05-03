@@ -237,6 +237,7 @@ export interface DatabaseAiMessage {
   thinking_content: string;
   input_token_count: number;
   output_token_count: number;
+  is_stopped: boolean;
   retrieved_fact_ids: number[];
   sources: DatabaseAiSource[];
   created_at: string;
@@ -328,6 +329,7 @@ export interface CodeAiMessage {
   thinking_content: string;
   input_token_count: number;
   output_token_count: number;
+  is_stopped: boolean;
   retrieved_fact_ids: number[];
   sources: CodeAiSource[];
   created_at: string;
@@ -344,6 +346,7 @@ export type DatabaseAiStreamEvent =
         session_id: string;
         user_message_id: number;
         thinking_enabled: boolean;
+        stream_id: string;
       };
     }
   | {
@@ -373,6 +376,13 @@ export type DatabaseAiStreamEvent =
         input_token_count: number;
         output_token_count: number;
         sources: DatabaseAiSource[];
+      };
+    }
+  | {
+      event: "interrupted";
+      data: {
+        session_id: string;
+        assistant_message_id: number;
       };
     }
   | {
@@ -389,6 +399,7 @@ export type CodeAiStreamEvent =
         session_id: string;
         user_message_id: number;
         thinking_enabled: boolean;
+        stream_id: string;
       };
     }
   | {
@@ -418,6 +429,13 @@ export type CodeAiStreamEvent =
         input_token_count: number;
         output_token_count: number;
         sources: CodeAiSource[];
+      };
+    }
+  | {
+      event: "interrupted";
+      data: {
+        session_id: string;
+        assistant_message_id: number;
       };
     }
   | {
@@ -457,4 +475,12 @@ export interface PollCreateRequest {
 export interface CreateCommentRequest {
   content: string;
   parent_comment_id: number | null;
+}
+
+export interface DatabaseAiStopRequest {
+  stream_id: string;
+}
+
+export interface CodeAiStopRequest {
+  stream_id: string;
 }

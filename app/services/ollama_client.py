@@ -1,5 +1,6 @@
 import json
 import re
+import threading
 from collections.abc import Iterator
 from typing import Any
 
@@ -10,6 +11,10 @@ THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
 class OllamaError(Exception):
+    pass
+
+
+class StreamInterrupted(Exception):
     pass
 
 
@@ -54,6 +59,7 @@ def stream_chat_with_ollama(
     user_prompt: str,
     thinking_enabled: bool,
     timeout_seconds: float = 120.0,
+    stop_event: threading.Event | None = None,
 ) -> Iterator[dict[str, Any]]:
     payload = {
         "model": model,
@@ -73,6 +79,8 @@ def stream_chat_with_ollama(
         ) as response:
             response.raise_for_status()
             for line in response.iter_lines():
+                if stop_event and stop_event.is_set():
+                    raise StreamInterrupted("Generation stopped by user")
                 if not line:
                     continue
                 try:
