@@ -24,6 +24,7 @@ import {
   Send,
   Shield,
   Sparkles,
+  Square,
   ThumbsDown,
   ThumbsUp,
   Unlock,
@@ -31,7 +32,7 @@ import {
   Vote,
   X,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -1831,6 +1832,7 @@ function CodeAiPanel({
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiStatus, setAiStatus] = useState<string | null>(null);
   const [health, setHealth] = useState<DatabaseAiHealthResponse | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const isSuperAdmin = currentUser?.role === "super_admin";
 
   const loadSession = async (sessionId: string) => {
@@ -1865,12 +1867,18 @@ function CodeAiPanel({
     void loadSessions();
   }, [currentUser?.id]);
 
+  const stopGeneration = () => {
+    abortRef.current?.abort();
+  };
+
   const submitQuestion = async (event: FormEvent) => {
     event.preventDefault();
     const trimmed = question.trim();
     if (!trimmed || busy) {
       return;
     }
+    const controller = new AbortController();
+    abortRef.current = controller;
     setBusy(true);
     setAiError(null);
     setAiStatus(null);
@@ -1994,16 +2002,20 @@ function CodeAiPanel({
             setAiError(streamEvent.data.message);
           }
         },
+        controller.signal,
       );
-      if (!streamError) {
+      if (!streamError && !controller.signal.aborted) {
         setAiStatus("回答已完成。");
       }
       setQuestion("");
       setSessions(await api.listCodeAiSessions());
     } catch (error) {
-      setAiError(getErrorMessage(error));
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        setAiError(getErrorMessage(error));
+      }
     } finally {
       setBusy(false);
+      abortRef.current = null;
     }
   };
 
@@ -2141,10 +2153,17 @@ function CodeAiPanel({
               }}
               placeholder="例如：create_app 注册了哪些路由？数据库 AI 面板在哪里处理 SSE？"
             />
-            <button className="primary" type="submit" disabled={busy || !question.trim()}>
-              {busy ? <RefreshCw size={17} /> : <Send size={17} />}
-              {busy ? "思考中" : "发送"}
-            </button>
+            {busy ? (
+              <button className="danger" type="button" onClick={stopGeneration}>
+                <Square size={17} />
+                暂停生成
+              </button>
+            ) : (
+              <button className="primary" type="submit" disabled={!question.trim()}>
+                <Send size={17} />
+                发送
+              </button>
+            )}
           </form>
         </div>
       </div>
@@ -2390,6 +2409,7 @@ function DatabaseAiPanel({ currentUser }: { currentUser: UserProfile | null }) {
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiStatus, setAiStatus] = useState<string | null>(null);
   const [health, setHealth] = useState<DatabaseAiHealthResponse | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const isSuperAdmin = currentUser?.role === "super_admin";
 
   const loadSessions = async () => {
@@ -2424,12 +2444,18 @@ function DatabaseAiPanel({ currentUser }: { currentUser: UserProfile | null }) {
     void loadSessions();
   }, [currentUser?.id]);
 
+  const stopGeneration = () => {
+    abortRef.current?.abort();
+  };
+
   const submitQuestion = async (event: FormEvent) => {
     event.preventDefault();
     const trimmed = question.trim();
     if (!trimmed || busy) {
       return;
     }
+    const controller = new AbortController();
+    abortRef.current = controller;
     setBusy(true);
     setAiError(null);
     setAiStatus(null);
@@ -2553,16 +2579,20 @@ function DatabaseAiPanel({ currentUser }: { currentUser: UserProfile | null }) {
             setAiError(streamEvent.data.message);
           }
         },
+        controller.signal,
       );
-      if (!streamError) {
+      if (!streamError && !controller.signal.aborted) {
         setAiStatus("回答已完成。");
       }
       setQuestion("");
       setSessions(await api.listDatabaseAiSessions());
     } catch (error) {
-      setAiError(getErrorMessage(error));
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        setAiError(getErrorMessage(error));
+      }
     } finally {
       setBusy(false);
+      abortRef.current = null;
     }
   };
 
@@ -2700,10 +2730,17 @@ function DatabaseAiPanel({ currentUser }: { currentUser: UserProfile | null }) {
               }}
               placeholder="例如：users 表保存了哪些字段？帖子和评论如何关联？"
             />
-            <button className="primary" type="submit" disabled={busy || !question.trim()}>
-              {busy ? <RefreshCw size={17} /> : <Send size={17} />}
-              {busy ? "思考中" : "发送"}
-            </button>
+            {busy ? (
+              <button className="danger" type="button" onClick={stopGeneration}>
+                <Square size={17} />
+                暂停生成
+              </button>
+            ) : (
+              <button className="primary" type="submit" disabled={!question.trim()}>
+                <Send size={17} />
+                发送
+              </button>
+            )}
           </form>
         </div>
       </div>
