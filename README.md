@@ -17,23 +17,35 @@
 .
 ├── app/
 │   ├── api/             # 路由（auth/users/posts/fan_circles/admin/databases/code）
-│   ├── core/            # 配置、JWT/密码、异常处理
+│   ├── core/            # 配置、JWT/密码、异常处理、工具函数
 │   ├── db/              # SQLite 连接与启动初始化
-│   ├── repositories/    # 数据访问层（CRUD）
+│   ├── repositories/    # 数据访问层（CRUD + AI 对话记录）
 │   ├── schemas/         # Pydantic 请求/响应模型
-│   └── services/        # 业务逻辑、权限、AI 服务
-├── frontend/            # Vite + React SPA
+│   └── services/        # 业务逻辑、权限、AI 问答、RAG
+├── frontend/
 │   └── src/
-│       ├── App.tsx      # 主组件
-│       ├── styles.css
-│       └── api/         # HTTP 客户端与 TypeScript 类型
+│       ├── App.tsx                  # 主组件
+│       ├── styles.css               # 全局样式
+│       ├── api/                     # HTTP 客户端与 TypeScript 类型
+│       ├── utils/                   # 常量与工具函数
+│       └── components/
+│           ├── ui/                  # 通用组件（EmptyState/Metric/NavButton 等）
+│           ├── auth/                # 登录注册弹窗
+│           ├── circles/             # 球迷圈、帖子、评论、投票
+│           ├── profile/             # 个人主页、用户列表
+│           ├── analytics/           # 活动分析面板
+│           ├── admin/               # 管理面板
+│           ├── databases/           # 数据库 AI 问答
+│           └── code/                # 代码知识库 AI 问答
 ├── sql/
-│   ├── 001_init.sql     # 建表、索引、FTS 虚拟表
-│   └── 002_seed.sql     # 默认球迷圈数据
-├── static/              # SVG 头像与球队 Logo
-├── tests/               # 后端接口测试
-├── .env.example         # 环境变量模板
-└── requirements.txt     # Python 依赖
+│   ├── 001_init.sql             # 建表、索引、FTS 虚拟表
+│   ├── 002_add_embeddings.sql   # AI 嵌入向量支持
+│   └── 002_seed.sql             # 默认球迷圈数据
+├── static/                      # SVG 头像与球队 Logo
+├── tests/                       # 后端接口测试（pytest）
+├── .env.example                 # 环境变量模板
+├── .gitignore
+└── requirements.txt             # Python 依赖
 ```
 
 ## 快速开始
