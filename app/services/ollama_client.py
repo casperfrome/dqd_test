@@ -121,5 +121,30 @@ def get_ollama_health(*, base_url: str, model: str, timeout_seconds: float = 5.0
     return {"ok": True, "error": None, "available_models": available}
 
 
+def get_embedding(
+    *,
+    base_url: str,
+    model: str,
+    text: str,
+    timeout_seconds: float = 30.0,
+) -> list[float]:
+    """Get embedding vector for text from Ollama's /api/embeddings endpoint."""
+    try:
+        response = httpx.post(
+            f"{base_url.rstrip('/')}/api/embeddings",
+            json={"model": model, "prompt": text},
+            timeout=timeout_seconds,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise OllamaError(f"Ollama embedding request failed: {exc}") from exc
+
+    embedding = data.get("embedding")
+    if not isinstance(embedding, list) or not embedding:
+        raise OllamaError("Ollama returned an empty embedding.")
+    return [float(v) for v in embedding]
+
+
 def strip_think_blocks(content: str) -> str:
     return THINK_BLOCK_RE.sub("", content)

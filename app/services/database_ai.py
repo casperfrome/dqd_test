@@ -15,7 +15,7 @@ from app.core.utils import utc_now_iso
 from app.db.connection import create_connection
 from app.repositories import ai_chat as ai_repo
 from app.services.database_catalog import inspect_databases
-from app.services.ollama_client import OllamaError, chat_with_ollama, get_ollama_health, stream_chat_with_ollama
+from app.services.ollama_client import OllamaError, chat_with_ollama, get_embedding, get_ollama_health, stream_chat_with_ollama
 from app.services.rag_utils import (
     build_messages_with_history,
     estimate_token_count,
@@ -78,23 +78,29 @@ def rebuild_database_facts(connection: sqlite3.Connection) -> dict[str, Any]:
 
 
 def ensure_database_facts_ready(connection: sqlite3.Connection, settings: Settings) -> None:
+    needs_rebuild = False
     if ai_repo.count_facts(connection) == 0:
+        needs_rebuild = True
+    else:
+        latest = ai_repo.get_latest_fact_updated_at(connection)
+        if not latest:
+            needs_rebuild = True
+        else:
+            try:
+                latest_datetime = datetime.fromisoformat(latest)
+            except ValueError:
+                needs_rebuild = True
+            else:
+                if latest_datetime.tzinfo is None:
+                    latest_datetime = latest_datetime.replace(tzinfo=timezone.utc)
+                age_seconds = (datetime.now(timezone.utc) - latest_datetime).total_seconds()
+                if age_seconds > settings.ai_fact_refresh_ttl_seconds:
+                    needs_rebuild = True
+
+    if needs_rebuild:
         rebuild_database_facts(connection)
-        return
-    latest = ai_repo.get_latest_fact_updated_at(connection)
-    if not latest:
-        rebuild_database_facts(connection)
-        return
-    try:
-        latest_datetime = datetime.fromisoformat(latest)
-    except ValueError:
-        rebuild_database_facts(connection)
-        return
-    if latest_datetime.tzinfo is None:
-        latest_datetime = latest_datetime.replace(tzinfo=timezone.utc)
-    age_seconds = (datetime.now(timezone.utc) - latest_datetime).total_seconds()
-    if age_seconds > settings.ai_fact_refresh_ttl_seconds:
-        rebuild_database_facts(connection)
+        if settings.ai_embedding_enabled:
+            _compute_embeddings_for_all_facts(connection, settings)
 
 
 def answer_database_question(
@@ -119,7 +125,7 @@ def answer_database_question(
         client_id_hash=client_id_hash,
         question=normalized_question,
     )
-    facts = retrieve_database_facts(connection, normalized_question, limit=settings.ai_rag_top_k)
+    facts = retrieve_database_facts(connection, normalized_question, limit=settings.ai_rag_top_k, settings=settings)
     facts = truncate_facts_to_budget(
         facts,
         max_tokens=settings.ai_rag_max_context_tokens,
@@ -233,7 +239,7 @@ def stream_database_question_events(
             client_id_hash=client_id_hash,
             question=normalized_question,
         )
-        facts = retrieve_database_facts(connection, normalized_question, limit=settings.ai_rag_top_k)
+        facts = retrieve_database_facts(connection, normalized_question, limit=settings.ai_rag_top_k, settings=settings)
         facts = truncate_facts_to_budget(
             facts,
             max_tokens=settings.ai_rag_max_context_tokens,
@@ -368,7 +374,63 @@ def sse_event(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-def retrieve_database_facts(connection: sqlite3.Connection, question: str, *, limit: int) -> list[dict[str, Any]]:
+def _hybrid_rerank(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    question: str,
+    facts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Rerank facts using hybrid BM25 + embedding similarity scores."""
+    from app.services.rag_utils import cosine_similarity, hybrid_score
+
+    try:
+        query_embedding = get_embedding(
+            base_url=settings.ollama_base_url,
+            model=settings.ai_embedding_model,
+            text=question,
+        )
+    except OllamaError:
+        return facts  # fallback: keep BM25 order
+
+    fact_ids = [int(f["id"]) for f in facts]
+    stored = ai_repo.get_embeddings_for_facts(connection, fact_ids)
+
+    for fact in facts:
+        emb = stored.get(int(fact["id"]))
+        if emb:
+            vec_score = cosine_similarity(query_embedding, emb)
+            fact["hybrid_score"] = hybrid_score(
+                float(fact.get("score", 0)),
+                vec_score,
+                alpha=settings.ai_hybrid_alpha,
+            )
+        else:
+            fact["hybrid_score"] = hybrid_score(float(fact.get("score", 0)), 0.0, alpha=1.0)
+
+    facts.sort(key=lambda f: float(f.get("hybrid_score", 0)), reverse=True)
+    return facts
+
+
+def _compute_embeddings_for_all_facts(connection: sqlite3.Connection, settings: Settings) -> None:
+    """Compute and store embeddings for facts that don't have one yet."""
+    rows = connection.execute(
+        "SELECT id, title, content FROM ai_database_facts WHERE embedding_json = ''"
+    ).fetchall()
+
+    for row in rows:
+        text = f"{row['title']}\n{row['content']}"
+        try:
+            embedding = get_embedding(
+                base_url=settings.ollama_base_url,
+                model=settings.ai_embedding_model,
+                text=text[:2000],
+            )
+            ai_repo.update_embedding(connection, int(row["id"]), json.dumps(embedding))
+        except OllamaError:
+            break  # Stop on first failure, try again next rebuild
+
+
+def retrieve_database_facts(connection: sqlite3.Connection, question: str, *, limit: int, settings: Settings | None = None) -> list[dict[str, Any]]:
     over_limit = limit * 2
     all_facts: list[dict[str, Any]] = []
 
@@ -391,6 +453,10 @@ def retrieve_database_facts(connection: sqlite3.Connection, question: str, *, li
 
     if not all_facts:
         all_facts = ai_repo.list_recent_facts(connection, limit=over_limit)
+
+    # Hybrid retrieval: fuse BM25 with embedding similarity
+    if settings and settings.ai_embedding_enabled and all_facts:
+        all_facts = _hybrid_rerank(connection, settings, question, all_facts)
 
     # MMR diversity rerank: select top_k diverse and relevant facts
     return mmr_rerank(all_facts, query=question, lambda_param=0.7, top_k=limit)

@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     ai_rag_top_k: int = Field(default=8, alias="AI_RAG_TOP_K")
     ai_rag_max_context_tokens: int = Field(default=4000, alias="AI_RAG_MAX_CONTEXT_TOKENS")
     ai_chat_history_max_turns: int = Field(default=5, alias="AI_CHAT_HISTORY_MAX_TURNS")
+    ai_embedding_enabled: bool = Field(default=False, alias="AI_EMBEDDING_ENABLED")
+    ai_embedding_model: str = Field(default="nomic-embed-text", alias="AI_EMBEDDING_MODEL")
+    ai_hybrid_alpha: float = Field(default=0.7, alias="AI_HYBRID_ALPHA")
 
     model_config = SettingsConfigDict(
         env_file=ROOT_DIR / ".env",

@@ -15,7 +15,7 @@ from app.core.utils import utc_now_iso
 from app.db.connection import create_connection
 from app.repositories import ai_code as ai_repo
 from app.services.code_catalog import list_code_files, read_code_file
-from app.services.ollama_client import OllamaError, chat_with_ollama, get_ollama_health, stream_chat_with_ollama
+from app.services.ollama_client import OllamaError, chat_with_ollama, get_embedding, get_ollama_health, stream_chat_with_ollama
 from app.services.rag_utils import (
     build_messages_with_history,
     estimate_token_count,
@@ -74,23 +74,29 @@ def rebuild_code_facts(connection: sqlite3.Connection) -> dict[str, Any]:
 
 
 def ensure_code_facts_ready(connection: sqlite3.Connection, settings: Settings) -> None:
+    needs_rebuild = False
     if ai_repo.count_facts(connection) == 0:
+        needs_rebuild = True
+    else:
+        latest = ai_repo.get_latest_fact_updated_at(connection)
+        if not latest:
+            needs_rebuild = True
+        else:
+            try:
+                latest_datetime = datetime.fromisoformat(latest)
+            except ValueError:
+                needs_rebuild = True
+            else:
+                if latest_datetime.tzinfo is None:
+                    latest_datetime = latest_datetime.replace(tzinfo=timezone.utc)
+                age_seconds = (datetime.now(timezone.utc) - latest_datetime).total_seconds()
+                if age_seconds > settings.ai_fact_refresh_ttl_seconds:
+                    needs_rebuild = True
+
+    if needs_rebuild:
         rebuild_code_facts(connection)
-        return
-    latest = ai_repo.get_latest_fact_updated_at(connection)
-    if not latest:
-        rebuild_code_facts(connection)
-        return
-    try:
-        latest_datetime = datetime.fromisoformat(latest)
-    except ValueError:
-        rebuild_code_facts(connection)
-        return
-    if latest_datetime.tzinfo is None:
-        latest_datetime = latest_datetime.replace(tzinfo=timezone.utc)
-    age_seconds = (datetime.now(timezone.utc) - latest_datetime).total_seconds()
-    if age_seconds > settings.ai_fact_refresh_ttl_seconds:
-        rebuild_code_facts(connection)
+        if settings.ai_embedding_enabled:
+            _compute_code_embeddings_for_all_facts(connection, settings)
 
 
 def answer_code_question(
@@ -115,7 +121,7 @@ def answer_code_question(
         client_id_hash=client_id_hash,
         question=normalized_question,
     )
-    facts = retrieve_code_facts(connection, normalized_question, limit=settings.ai_rag_top_k)
+    facts = retrieve_code_facts(connection, normalized_question, limit=settings.ai_rag_top_k, settings=settings)
     facts = truncate_facts_to_budget(
         facts,
         max_tokens=settings.ai_rag_max_context_tokens,
@@ -229,7 +235,7 @@ def stream_code_question_events(
             client_id_hash=client_id_hash,
             question=normalized_question,
         )
-        facts = retrieve_code_facts(connection, normalized_question, limit=settings.ai_rag_top_k)
+        facts = retrieve_code_facts(connection, normalized_question, limit=settings.ai_rag_top_k, settings=settings)
         facts = truncate_facts_to_budget(
             facts,
             max_tokens=settings.ai_rag_max_context_tokens,
@@ -364,7 +370,63 @@ def sse_event(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-def retrieve_code_facts(connection: sqlite3.Connection, question: str, *, limit: int) -> list[dict[str, Any]]:
+def _hybrid_code_rerank(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    question: str,
+    facts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Rerank code facts using hybrid BM25 + embedding similarity scores."""
+    from app.services.rag_utils import cosine_similarity, hybrid_score
+
+    try:
+        query_embedding = get_embedding(
+            base_url=settings.ollama_base_url,
+            model=settings.ai_embedding_model,
+            text=question,
+        )
+    except OllamaError:
+        return facts
+
+    fact_ids = [int(f["id"]) for f in facts]
+    stored = ai_repo.get_embeddings_for_facts(connection, fact_ids)
+
+    for fact in facts:
+        emb = stored.get(int(fact["id"]))
+        if emb:
+            vec_score = cosine_similarity(query_embedding, emb)
+            fact["hybrid_score"] = hybrid_score(
+                float(fact.get("score", 0)),
+                vec_score,
+                alpha=settings.ai_hybrid_alpha,
+            )
+        else:
+            fact["hybrid_score"] = hybrid_score(float(fact.get("score", 0)), 0.0, alpha=1.0)
+
+    facts.sort(key=lambda f: float(f.get("hybrid_score", 0)), reverse=True)
+    return facts
+
+
+def _compute_code_embeddings_for_all_facts(connection: sqlite3.Connection, settings: Settings) -> None:
+    """Compute and store embeddings for code facts that don't have one yet."""
+    rows = connection.execute(
+        "SELECT id, title, content FROM ai_code_facts WHERE embedding_json = ''"
+    ).fetchall()
+
+    for row in rows:
+        text = f"{row['title']}\n{row['content']}"
+        try:
+            embedding = get_embedding(
+                base_url=settings.ollama_base_url,
+                model=settings.ai_embedding_model,
+                text=text[:2000],
+            )
+            ai_repo.update_embedding(connection, int(row["id"]), json.dumps(embedding))
+        except OllamaError:
+            break
+
+
+def retrieve_code_facts(connection: sqlite3.Connection, question: str, *, limit: int, settings: Settings | None = None) -> list[dict[str, Any]]:
     over_limit = limit * 2
     all_facts: list[dict[str, Any]] = []
 
@@ -387,6 +449,10 @@ def retrieve_code_facts(connection: sqlite3.Connection, question: str, *, limit:
 
     if not all_facts:
         all_facts = ai_repo.list_recent_facts(connection, limit=over_limit)
+
+    # Hybrid retrieval: fuse BM25 with embedding similarity
+    if settings and settings.ai_embedding_enabled and all_facts:
+        all_facts = _hybrid_code_rerank(connection, settings, question, all_facts)
 
     # MMR diversity rerank: select top_k diverse and relevant facts
     return mmr_rerank(all_facts, query=question, lambda_param=0.7, top_k=limit)
@@ -456,30 +522,228 @@ def _build_facts_from_code(generated_at: str) -> list[dict[str, Any]]:
         lines = content.splitlines()
         if not lines:
             continue
-        start_index = 0
-        while start_index < len(lines):
-            end_index = min(start_index + CHUNK_LINE_COUNT, len(lines))
-            chunk_lines = lines[start_index:end_index]
-            start_line = start_index + 1
-            end_line = end_index
-            facts.append(
-                _fact(
-                    source_file_path=str(file_info["path"]),
-                    language=str(file_info["language"]),
-                    start_line=start_line,
-                    end_line=end_line,
-                    title=f"{file_info['path']}:{start_line}-{end_line}",
-                    content="\n".join(chunk_lines),
-                    metadata={
-                        "file": file_info,
-                        "line_count": file_detail["line_count"],
-                    },
-                    generated_at=generated_at,
-                ),
-            )
-            if end_index >= len(lines):
-                break
-            start_index = max(end_index - CHUNK_OVERLAP, start_index + 1)
+
+        language = str(file_info["language"])
+        if language == "python":
+            facts.extend(_chunk_python_ast(file_info, file_detail, lines, generated_at))
+        else:
+            facts.extend(_chunk_fixed_window(file_info, file_detail, lines, generated_at))
+    return facts
+
+
+def _chunk_fixed_window(
+    file_info: dict[str, Any],
+    file_detail: dict[str, Any],
+    lines: list[str],
+    generated_at: str,
+) -> list[dict[str, Any]]:
+    """Fixed-window sliding chunking for non-Python files."""
+    facts: list[dict[str, Any]] = []
+    start_index = 0
+    while start_index < len(lines):
+        end_index = min(start_index + CHUNK_LINE_COUNT, len(lines))
+        chunk_lines = lines[start_index:end_index]
+        facts.append(
+            _fact(
+                source_file_path=str(file_info["path"]),
+                language=str(file_info["language"]),
+                start_line=start_index + 1,
+                end_line=end_index,
+                title=f"{file_info['path']}:{start_index + 1}-{end_index}",
+                content="\n".join(chunk_lines),
+                metadata={
+                    "file": file_info,
+                    "line_count": file_detail["line_count"],
+                },
+                generated_at=generated_at,
+            ),
+        )
+        if end_index >= len(lines):
+            break
+        start_index = max(end_index - CHUNK_OVERLAP, start_index + 1)
+    return facts
+
+
+def _chunk_python_ast(
+    file_info: dict[str, Any],
+    file_detail: dict[str, Any],
+    lines: list[str],
+    generated_at: str,
+) -> list[dict[str, Any]]:
+    """AST-aware chunking: group by function/class boundaries for Python files."""
+    import ast
+
+    file_path = str(file_info["path"])
+    facts: list[dict[str, Any]] = []
+    source = "\n".join(lines)
+    lineno_map: dict[int, int] = {}  # node end_lineno → next sibling start
+
+    try:
+        tree = ast.parse(source, filename=file_path)
+    except SyntaxError:
+        # Fall back to fixed-window on parse errors
+        return _chunk_fixed_window(file_info, file_detail, lines, generated_at)
+
+    # Collect top-level nodes with their line ranges
+    nodes: list[dict[str, Any]] = []
+    import_lines_start: int | None = None
+    import_lines_end: int | None = None
+
+    for node in tree.body:
+        start = node.lineno
+        end = getattr(node, "end_lineno", start)
+
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            if import_lines_start is None:
+                import_lines_start = start
+            import_lines_end = max(import_lines_end or end, end)
+            continue
+
+        # Flush import block before first non-import node
+        if import_lines_start is not None:
+            nodes.append({
+                "type": "imports",
+                "start": import_lines_start,
+                "end": import_lines_end,
+                "name": "",
+                "docstring": "",
+            })
+            import_lines_start = None
+            import_lines_end = None
+
+        name = ""
+        docstring = ""
+        if isinstance(node, ast.FunctionDef):
+            name = node.name
+            docstring = ast.get_docstring(node) or ""
+        elif isinstance(node, ast.AsyncFunctionDef):
+            name = node.name
+            docstring = ast.get_docstring(node) or ""
+        elif isinstance(node, ast.ClassDef):
+            name = node.name
+            docstring = ast.get_docstring(node) or ""
+
+        nodes.append({
+            "type": type(node).__name__,
+            "start": start,
+            "end": end,
+            "name": name,
+            "docstring": docstring,
+        })
+
+    # Flush trailing imports
+    if import_lines_start is not None:
+        nodes.append({
+            "type": "imports",
+            "start": import_lines_start,
+            "end": import_lines_end,
+            "name": "",
+            "docstring": "",
+        })
+
+    # Group nodes into chunks respecting size limits
+    current_chunk_start: int | None = None
+    current_chunk_end: int | None = None
+    chunk_names: list[str] = []
+    chunk_docstrings: list[str] = []
+
+    def _emit_chunk(start: int, end: int, names: list[str], docs: list[str]) -> None:
+        if start > len(lines):
+            return
+        chunk_lines = lines[start - 1 : min(end, len(lines))]
+        title = f"{file_path}:{start}-{min(end, len(lines))}"
+        names_str = names[0] if len(names) == 1 else ", ".join(names[:3])
+        if names_str:
+            title = f"{title} ({names_str})"
+        facts.append(
+            _fact(
+                source_file_path=file_path,
+                language="python",
+                start_line=start,
+                end_line=min(end, len(lines)),
+                title=title,
+                content="\n".join(chunk_lines),
+                metadata={
+                    "file": file_info,
+                    "line_count": file_detail["line_count"],
+                    "function_name": names_str if names else "",
+                    "docstring": "\n".join(docs) if docs else "",
+                },
+                generated_at=generated_at,
+            ),
+        )
+
+    for node in nodes:
+        node_lines = node["end"] - node["start"] + 1
+
+        # If this single node exceeds chunk size, split it
+        if node_lines > CHUNK_LINE_COUNT * 1.5:
+            if current_chunk_start is not None:
+                _emit_chunk(
+                    current_chunk_start, current_chunk_end or current_chunk_start,
+                    chunk_names, chunk_docstrings,
+                )
+            # Split large node with fixed-window
+            start_line = node["start"]
+            while start_line <= node["end"]:
+                chunk_end = min(start_line + CHUNK_LINE_COUNT - 1, node["end"])
+                chunk_lines_inner = lines[start_line - 1 : chunk_end]
+                name_tag = f"{node['name']} pt{start_line}" if node["name"] else ""
+                title = f"{file_path}:{start_line}-{chunk_end}"
+                if name_tag:
+                    title = f"{title} ({name_tag})"
+                facts.append(
+                    _fact(
+                        source_file_path=file_path,
+                        language="python",
+                        start_line=start_line,
+                        end_line=chunk_end,
+                        title=title,
+                        content="\n".join(chunk_lines_inner),
+                        metadata={
+                            "file": file_info,
+                            "line_count": file_detail["line_count"],
+                            "function_name": node["name"],
+                            "class_name": "",
+                            "docstring": node["docstring"],
+                        },
+                        generated_at=generated_at,
+                    ),
+                )
+                start_line = max(chunk_end - CHUNK_OVERLAP + 1, start_line + 1)
+            current_chunk_start = None
+            current_chunk_end = None
+            chunk_names = []
+            chunk_docstrings = []
+            continue
+
+        # Start or extend a chunk
+        if current_chunk_start is None:
+            current_chunk_start = node["start"]
+            current_chunk_end = node["end"]
+        else:
+            current_chunk_end = node["end"]
+
+        if node["name"]:
+            chunk_names.append(node["name"])
+        if node["docstring"]:
+            chunk_docstrings.append(node["docstring"])
+
+        # Emit chunk if it's getting too large
+        chunk_span = (current_chunk_end or 0) - (current_chunk_start or 0) + 1
+        if chunk_span >= CHUNK_LINE_COUNT:
+            _emit_chunk(current_chunk_start, current_chunk_end or current_chunk_start,
+                        chunk_names, chunk_docstrings)
+            current_chunk_start = None
+            current_chunk_end = None
+            chunk_names = []
+            chunk_docstrings = []
+
+    # Emit final chunk
+    if current_chunk_start is not None:
+        _emit_chunk(current_chunk_start, current_chunk_end or current_chunk_start,
+                    chunk_names, chunk_docstrings)
+
     return facts
 
 

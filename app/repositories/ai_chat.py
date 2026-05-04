@@ -137,6 +137,32 @@ def list_recent_facts(connection: sqlite3.Connection, *, limit: int) -> list[dic
     return [_decode_metadata(row) for row in rows]
 
 
+def update_embedding(connection: sqlite3.Connection, fact_id: int, embedding_json: str) -> None:
+    connection.execute(
+        "UPDATE ai_database_facts SET embedding_json = ? WHERE id = ?",
+        (embedding_json, fact_id),
+    )
+
+
+def get_embeddings_for_facts(connection: sqlite3.Connection, fact_ids: list[int]) -> dict[int, list[float]]:
+    if not fact_ids:
+        return {}
+    placeholders = ",".join("?" for _ in fact_ids)
+    rows = connection.execute(
+        f"SELECT id, embedding_json FROM ai_database_facts WHERE id IN ({placeholders})",
+        tuple(fact_ids),
+    ).fetchall()
+    result: dict[int, list[float]] = {}
+    for row in rows:
+        try:
+            embedding = json.loads(str(row["embedding_json"] or "[]"))
+            if embedding:
+                result[int(row["id"])] = [float(v) for v in embedding]
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return result
+
+
 def get_facts_by_ids(connection: sqlite3.Connection, fact_ids: list[int]) -> list[dict[str, Any]]:
     if not fact_ids:
         return []
