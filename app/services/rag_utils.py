@@ -63,15 +63,30 @@ _SYNONYM_PAIRS: list[tuple[str, str]] = [
 ]
 
 
+def _is_cjk(ch: str) -> bool:
+    cp = ord(ch)
+    # CJK Unified Ideographs + Ext A + Compatibility + Hiragana/Katakana + Hangul
+    return (
+        0x3040 <= cp <= 0x30FF       # Hiragana, Katakana
+        or 0x3400 <= cp <= 0x4DBF    # CJK Ext A
+        or 0x4E00 <= cp <= 0x9FFF    # CJK Unified
+        or 0xAC00 <= cp <= 0xD7AF    # Hangul Syllables
+        or 0xF900 <= cp <= 0xFAFF    # CJK Compat
+        or 0xFF00 <= cp <= 0xFFEF    # Halfwidth/Fullwidth
+    )
+
+
 def estimate_token_count(text: str) -> int:
     """Estimate token count with a mixed-script heuristic.
 
-    CJK characters ≈ 1 token each; Latin words ≈ tokens/3.5 ~ chars/2.5.
-    The rough average factor of 4 works well for mixed Chinese/English code text.
+    CJK characters ≈ 1 token each; Latin chars ≈ chars/4 (typical BPE ratio).
     """
-    cjk = sum(1 for ch in text if "一" <= ch <= "鿿" or "぀" <= ch <= "ヿ")
-    latin = len(text) - cjk
-    return max(1, cjk + latin // 3)
+    if not text:
+        return 0
+    cjk = sum(1 for ch in text if _is_cjk(ch))
+    non_cjk = len(text) - cjk
+    non_cjk_tokens = (non_cjk + 3) // 4 if non_cjk > 0 else 0
+    return max(1, cjk + non_cjk_tokens)
 
 
 def truncate_facts_to_budget(
@@ -156,16 +171,26 @@ def mmr_rerank(
     if not facts or len(facts) <= top_k:
         return facts
 
-    # Normalize BM25 scores: lower is better → invert so higher = better
-    scores = [float(f.get("score", 0)) for f in facts]
-    min_score = min(scores)
-    max_score = max(scores)
-    if max_score > min_score:
-        normalized = [(s - min_score) / (max_score - min_score) for s in scores]
-        # Invert BM25 (lower = better) and scale to [0, 1]
-        relevance = [1.0 - ns for ns in normalized]
+    # Prefer hybrid_score (higher = better) when set by hybrid rerank;
+    # otherwise fall back to BM25 score (lower = better, must invert).
+    use_hybrid = any("hybrid_score" in f for f in facts)
+    if use_hybrid:
+        raw = [float(f.get("hybrid_score", 0.0)) for f in facts]
+        min_r, max_r = min(raw), max(raw)
+        if max_r > min_r:
+            relevance = [(r - min_r) / (max_r - min_r) for r in raw]
+        else:
+            relevance = [1.0] * len(facts)
     else:
-        relevance = [1.0 / len(facts)] * len(facts)
+        scores = [float(f.get("score", 0)) for f in facts]
+        min_score = min(scores)
+        max_score = max(scores)
+        if max_score > min_score:
+            normalized = [(s - min_score) / (max_score - min_score) for s in scores]
+            # Invert BM25 (lower = better) → higher = better
+            relevance = [1.0 - ns for ns in normalized]
+        else:
+            relevance = [1.0] * len(facts)
 
     # Concatenate title + content for Jaccard comparison
     texts = [f"{f.get('title', '')} {f.get('content', '')}" for f in facts]
@@ -245,24 +270,22 @@ def build_messages_with_history(
     messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
 
     if history_messages and max_turns > 0:
-        # Take the last N user+assistant pairs
+        # Pair adjacent user→assistant. Skip orphan user messages (e.g. failed turns)
+        # but never silently drop content — orphans break pairing, not the conversation.
         pairs: list[tuple[dict, dict]] = []
         i = 0
         while i < len(history_messages):
-            if history_messages[i]["role"] == "user" and i + 1 < len(history_messages):
-                if history_messages[i + 1]["role"] == "assistant":
-                    pairs.append((history_messages[i], history_messages[i + 1]))
-                    i += 2
-                    continue
-            i += 1
+            msg = history_messages[i]
+            if msg["role"] == "user" and i + 1 < len(history_messages) and history_messages[i + 1]["role"] == "assistant":
+                pairs.append((msg, history_messages[i + 1]))
+                i += 2
+            else:
+                i += 1
 
-        # Keep only the last max_turns pairs
-        recent_pairs = pairs[-max_turns:] if max_turns > 0 else []
+        recent_pairs = pairs[-max_turns:]
 
         for user_msg, assistant_msg in recent_pairs:
-            # History user message: just the question (no RAG facts re-attached)
             messages.append({"role": "user", "content": str(user_msg["content"])})
-            # History assistant message: just the answer
             messages.append({"role": "assistant", "content": str(assistant_msg["content"])})
 
     # Current user message with RAG context
@@ -281,7 +304,12 @@ def hybrid_score(bm25_score: float, vector_score: float, alpha: float = 0.7) -> 
     Returns:
         Combined score where higher is better.
     """
-    # Normalize BM25: lower (more negative) is better in FTS5
-    # We invert so higher = better for both
-    bm25_normalized = 1.0 / (1.0 + abs(bm25_score)) if bm25_score < 0 else 0.5
-    return alpha * bm25_normalized + (1.0 - alpha) * vector_score
+    # FTS5 BM25 is non-positive; map -∞..0 → 0..1 monotonically (more negative → higher).
+    # When score is exactly 0 (e.g. list_recent_facts placeholder), treat as no BM25 signal.
+    if bm25_score < 0:
+        bm25_normalized = 1.0 - 1.0 / (1.0 + abs(bm25_score))
+    else:
+        bm25_normalized = 0.0
+    # Clamp cosine to [0, 1] so negative similarity doesn't drag the combined score below 0.
+    vec_clamped = max(0.0, min(1.0, vector_score))
+    return alpha * bm25_normalized + (1.0 - alpha) * vec_clamped

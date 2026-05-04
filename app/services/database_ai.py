@@ -69,6 +69,8 @@ def rebuild_database_facts(connection: sqlite3.Connection) -> dict[str, Any]:
     if stale_hashes:
         ai_repo.delete_facts_by_hashes(connection, stale_hashes)
 
+    connection.commit()
+
     return {
         "fact_count": len(new_facts),
         "new_facts": inserted,
@@ -99,8 +101,12 @@ def ensure_database_facts_ready(connection: sqlite3.Connection, settings: Settin
 
     if needs_rebuild:
         rebuild_database_facts(connection)
-        if settings.ai_embedding_enabled:
-            _compute_embeddings_for_all_facts(connection, settings)
+
+    # Always backfill missing embeddings when enabled — covers the case where
+    # embeddings were toggled on after facts were already built, or prior
+    # embedding computation was interrupted.
+    if settings.ai_embedding_enabled:
+        _compute_embeddings_for_all_facts(connection, settings)
 
 
 def answer_database_question(
@@ -225,6 +231,8 @@ def stream_database_question_events(
     fact_ids: list[int] = []
     input_token_count = 0
     output_token_count = 0
+    answer_parts: list[str] = []
+    thinking_parts: list[str] = []
     try:
         normalized_question = question.strip()
         if not normalized_question:
@@ -278,8 +286,6 @@ def stream_database_question_events(
             max_turns=settings.ai_chat_history_max_turns,
         )
 
-        answer_parts: list[str] = []
-        thinking_parts: list[str] = []
         for event in stream_chat_with_ollama(
             base_url=settings.ollama_base_url,
             model=settings.ai_chat_model,
@@ -343,6 +349,25 @@ def stream_database_question_events(
     except (AppError, OllamaError) as exc:
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         if session is not None and user_message is not None:
+            # Persist any partial assistant content as a "failed" assistant message,
+            # so the next turn's history pairing stays consistent and the user can
+            # see what was generated before the error.
+            partial_answer = "".join(answer_parts).strip()
+            try:
+                if partial_answer:
+                    ai_repo.insert_message(
+                        connection,
+                        session_id=int(session["id"]),
+                        role="assistant",
+                        content=f"[生成中断] {partial_answer}\n\n错误：{str(exc)[:200]}",
+                        retrieved_fact_ids=fact_ids,
+                        thinking_enabled=thinking_enabled,
+                        input_token_count=input_token_count,
+                        output_token_count=output_token_count,
+                        created_at=utc_now_iso(),
+                    )
+            except sqlite3.Error:
+                pass
             ai_repo.insert_event(
                 connection,
                 event_type="chat_completion",
@@ -412,11 +437,18 @@ def _hybrid_rerank(
 
 
 def _compute_embeddings_for_all_facts(connection: sqlite3.Connection, settings: Settings) -> None:
-    """Compute and store embeddings for facts that don't have one yet."""
+    """Compute and store embeddings for facts that don't have one yet.
+
+    Tolerates transient Ollama failures up to a small threshold before giving up,
+    so a single network blip doesn't permanently leave embeddings empty.
+    """
     rows = connection.execute(
         "SELECT id, title, content FROM ai_database_facts WHERE embedding_json = ''"
     ).fetchall()
 
+    consecutive_failures = 0
+    max_consecutive_failures = 3
+    updated = 0
     for row in rows:
         text = f"{row['title']}\n{row['content']}"
         try:
@@ -426,8 +458,15 @@ def _compute_embeddings_for_all_facts(connection: sqlite3.Connection, settings: 
                 text=text[:2000],
             )
             ai_repo.update_embedding(connection, int(row["id"]), json.dumps(embedding))
+            consecutive_failures = 0
+            updated += 1
         except OllamaError:
-            break  # Stop on first failure, try again next rebuild
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:
+                break
+
+    if updated:
+        connection.commit()
 
 
 def retrieve_database_facts(connection: sqlite3.Connection, question: str, *, limit: int, settings: Settings | None = None) -> list[dict[str, Any]]:
