@@ -16,6 +16,13 @@ from app.db.connection import create_connection
 from app.repositories import ai_chat as ai_repo
 from app.services.database_catalog import inspect_databases
 from app.services.ollama_client import OllamaError, chat_with_ollama, get_ollama_health, stream_chat_with_ollama
+from app.services.rag_utils import (
+    build_messages_with_history,
+    estimate_token_count,
+    expand_query_rule_based,
+    mmr_rerank,
+    truncate_facts_to_budget,
+)
 
 
 INTERNAL_AI_SAMPLE_TABLES = {
@@ -28,20 +35,46 @@ INTERNAL_AI_SAMPLE_TABLES = {
 
 SYSTEM_PROMPT = """
 你是 FootballDomain 项目的数据库 AI 助手。
-你必须用中文回答。
-你只能依据提供的 RAG 数据库事实回答；如果事实不足以支持结论，要明确说明“当前数据库事实不足以判断”。
-不要编造不存在的表、字段、关系或样例数据。
-不要生成会被执行的写入、更新或删除语句；如需给 SQL 示例，只能给只读 SELECT 示例。
+你必须用中文回答，回答要结构化、条理清晰。
+
+## 规则
+- 你只能依据提供的 RAG 数据库事实回答；如果事实不足以支持结论，要明确说明当前数据库事实不足以判断并列出缺少什么信息。
+- 不要编造不存在的表、字段、关系或样例数据。
+- 不要生成会被执行的写入、更新或删除语句；如需给 SQL 示例，只能给只读 SELECT 示例。
+- 回答中引用事实时，必须标注 fact_id，格式：[fact_id=N]。
+
+## 示例
+问：users 表有哪些字段？
+答：users 表包含以下字段：
+- id (INTEGER, 主键) [fact_id=3]
+- username (TEXT, NOT NULL) [fact_id=5]
+- email (TEXT) [fact_id=7]
 """.strip()
 
 
 def rebuild_database_facts(connection: sqlite3.Connection) -> dict[str, Any]:
     generated_at = utc_now_iso()
-    facts = _build_facts_from_catalog(generated_at)
-    ai_repo.clear_facts(connection)
-    for fact in facts:
-        ai_repo.insert_fact(connection, **fact)
-    return {"fact_count": len(facts), "rebuilt_at": generated_at}
+    new_facts = _build_facts_from_catalog(generated_at)
+    new_hashes = {f["content_hash"] for f in new_facts}
+
+    existing_hashes = ai_repo.get_existing_hashes(connection)
+
+    inserted = 0
+    for fact in new_facts:
+        if fact["content_hash"] not in existing_hashes:
+            ai_repo.insert_fact(connection, **fact)
+            inserted += 1
+
+    stale_hashes = existing_hashes - new_hashes
+    if stale_hashes:
+        ai_repo.delete_facts_by_hashes(connection, stale_hashes)
+
+    return {
+        "fact_count": len(new_facts),
+        "new_facts": inserted,
+        "stale_removed": len(stale_hashes),
+        "rebuilt_at": generated_at,
+    }
 
 
 def ensure_database_facts_ready(connection: sqlite3.Connection, settings: Settings) -> None:
@@ -87,6 +120,11 @@ def answer_database_question(
         question=normalized_question,
     )
     facts = retrieve_database_facts(connection, normalized_question, limit=settings.ai_rag_top_k)
+    facts = truncate_facts_to_budget(
+        facts,
+        max_tokens=settings.ai_rag_max_context_tokens,
+        question=normalized_question,
+    )
     fact_ids = [int(fact["id"]) for fact in facts]
     created_at = utc_now_iso()
     user_message = ai_repo.insert_message(
@@ -98,13 +136,22 @@ def answer_database_question(
         created_at=created_at,
     )
 
+    # Load history and build multi-turn messages
+    history = ai_repo.list_messages(connection, int(session["id"]))
+    user_prompt = _build_user_prompt(normalized_question, facts)
+    messages = build_messages_with_history(
+        system_prompt=SYSTEM_PROMPT,
+        user_prompt=user_prompt,
+        history_messages=[m for m in history if m["id"] != user_message["id"]],
+        max_turns=settings.ai_chat_history_max_turns,
+    )
+
     started_at = time.perf_counter()
     try:
         answer = chat_with_ollama(
             base_url=settings.ollama_base_url,
             model=settings.ai_chat_model,
-            system_prompt=SYSTEM_PROMPT,
-            user_prompt=_build_user_prompt(normalized_question, facts),
+            messages=messages,
         )
     except OllamaError as exc:
         duration_ms = int((time.perf_counter() - started_at) * 1000)
@@ -187,6 +234,11 @@ def stream_database_question_events(
             question=normalized_question,
         )
         facts = retrieve_database_facts(connection, normalized_question, limit=settings.ai_rag_top_k)
+        facts = truncate_facts_to_budget(
+            facts,
+            max_tokens=settings.ai_rag_max_context_tokens,
+            question=normalized_question,
+        )
         fact_ids = [int(fact["id"]) for fact in facts]
         user_message = ai_repo.insert_message(
             connection,
@@ -210,13 +262,22 @@ def stream_database_question_events(
         )
         yield sse_event("sources", {"sources": sources})
 
+        # Load history and build multi-turn messages
+        history = ai_repo.list_messages(connection, int(session["id"]))
+        user_prompt = _build_user_prompt(normalized_question, facts)
+        messages = build_messages_with_history(
+            system_prompt=SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            history_messages=[m for m in history if m["id"] != user_message["id"]],
+            max_turns=settings.ai_chat_history_max_turns,
+        )
+
         answer_parts: list[str] = []
         thinking_parts: list[str] = []
         for event in stream_chat_with_ollama(
             base_url=settings.ollama_base_url,
             model=settings.ai_chat_model,
-            system_prompt=SYSTEM_PROMPT,
-            user_prompt=_build_user_prompt(normalized_question, facts),
+            messages=messages,
             thinking_enabled=thinking_enabled,
         ):
             if event["type"] == "thinking_delta":
@@ -308,15 +369,31 @@ def sse_event(event: str, data: dict[str, Any]) -> str:
 
 
 def retrieve_database_facts(connection: sqlite3.Connection, question: str, *, limit: int) -> list[dict[str, Any]]:
+    over_limit = limit * 2
+    all_facts: list[dict[str, Any]] = []
+
     match_query = _to_fts_query(question)
     if match_query:
         try:
-            facts = ai_repo.search_facts(connection, match_query, limit=limit)
-            if facts:
-                return facts
+            all_facts = ai_repo.search_facts(connection, match_query, limit=over_limit)
         except sqlite3.Error:
             pass
-    return ai_repo.list_recent_facts(connection, limit=limit)
+
+    # Try synonym-expanded queries as supplementary
+    extra_queries = expand_query_rule_based(question)
+    for eq in extra_queries:
+        try:
+            extra = ai_repo.search_facts(connection, eq, limit=over_limit)
+            seen = {f["id"] for f in all_facts}
+            all_facts.extend(f for f in extra if f["id"] not in seen)
+        except sqlite3.Error:
+            continue
+
+    if not all_facts:
+        all_facts = ai_repo.list_recent_facts(connection, limit=over_limit)
+
+    # MMR diversity rerank: select top_k diverse and relevant facts
+    return mmr_rerank(all_facts, query=question, lambda_param=0.7, top_k=limit)
 
 
 def list_chat_sessions(
@@ -568,20 +645,32 @@ def _title_from_question(question: str) -> str:
 
 
 def _to_fts_query(question: str) -> str:
-    tokens = re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]", question)
-    tokens = tokens[:24]
-    return " OR ".join(f'"{token.replace(chr(34), chr(34) + chr(34))}"' for token in tokens)
+    # Extract identifiers (including compound names) and CJK characters
+    tokens = re.findall(r"[A-Za-z0-9_./:-]+|[\u4e00-\u9fff]", question)
+    # Split compound identifiers into sub-tokens (e.g. user_id \u2192 user_id + user + id)
+    expanded: list[str] = []
+    for token in tokens[:32]:
+        expanded.append(token)
+        expanded.extend(part for part in re.split(r"[_./:-]+", token) if part and part != token)
+    unique = list(dict.fromkeys(expanded))[:48]
+    return " OR ".join(f'"{token.replace(chr(34), chr(34) + chr(34))}"' for token in unique)
 
 
 def _build_user_prompt(question: str, facts: list[dict[str, Any]]) -> str:
     if facts:
+        # Check average BM25 score for confidence hint
+        scores = [float(f.get("score", 0)) for f in facts]
+        avg_score = sum(scores) / len(scores) if scores else 0.0
+        confidence = "高置信度" if avg_score < -2.0 else "近似匹配"
+        header = f"RAG 数据库事实（{confidence}）："
         context = "\n\n".join(
             f"[fact_id={fact['id']}] {fact['title']}\n{fact['content']}"
             for fact in facts
         )
     else:
+        header = "RAG 数据库事实："
         context = "没有检索到相关数据库事实。"
-    return f"用户问题：{question}\n\nRAG 数据库事实：\n{context}\n\n请根据以上事实回答。"
+    return f"用户问题：{question}\n\n{header}\n{context}\n\n请根据以上事实回答。请在回答中引用所使用的 fact_id。"
 
 
 def _source_from_fact(fact: dict[str, Any]) -> dict[str, Any]:

@@ -17,17 +17,20 @@ def chat_with_ollama(
     *,
     base_url: str,
     model: str,
-    system_prompt: str,
-    user_prompt: str,
+    system_prompt: str = "",
+    user_prompt: str = "",
+    messages: list[dict[str, str]] | None = None,
     timeout_seconds: float = 120.0,
 ) -> str:
+    if messages is None:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
     payload = {
         "model": model,
         "stream": False,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
+        "messages": messages,
     }
     try:
         response = httpx.post(
@@ -50,19 +53,22 @@ def stream_chat_with_ollama(
     *,
     base_url: str,
     model: str,
-    system_prompt: str,
-    user_prompt: str,
+    system_prompt: str = "",
+    user_prompt: str = "",
+    messages: list[dict[str, str]] | None = None,
     thinking_enabled: bool,
     timeout_seconds: float = 120.0,
 ) -> Iterator[dict[str, Any]]:
+    if messages is None:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
     payload = {
         "model": model,
         "stream": True,
         "think": thinking_enabled,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
+        "messages": messages,
     }
     try:
         with httpx.stream(

@@ -16,26 +16,61 @@ from app.db.connection import create_connection
 from app.repositories import ai_code as ai_repo
 from app.services.code_catalog import list_code_files, read_code_file
 from app.services.ollama_client import OllamaError, chat_with_ollama, get_ollama_health, stream_chat_with_ollama
+from app.services.rag_utils import (
+    build_messages_with_history,
+    estimate_token_count,
+    expand_query_rule_based,
+    mmr_rerank,
+    truncate_facts_to_budget,
+)
 
 
 CHUNK_LINE_COUNT = 120
 CHUNK_OVERLAP = 20
 
 SYSTEM_PROMPT = """
-你是 FootballDomain 项目的代码 AI 助手，必须用中文回答。
-你只能依据提供的 RAG 代码片段回答；如果片段不足以支持结论，要明确说明“当前代码事实不足以判断”。
-回答涉及实现位置时，必须引用文件路径和行号范围。不要编造不存在的文件、函数、组件或接口。
-不要生成会修改项目的命令；如需给示例代码，应说明它只是建议。
+你是 FootballDomain 项目的代码 AI 助手，必须用中文回答，回答要结构化、条理清晰。
+
+## 规则
+- 你只能依据提供的 RAG 代码片段回答；如果片段不足以支持结论，要明确说明当前代码事实不足以判断并列出缺少什么信息。
+- 回答涉及实现位置时，必须引用文件路径和行号范围。不要编造不存在的文件、函数、组件或接口。
+- 不要生成会修改项目的命令；如需给示例代码，应说明它只是建议。
+- 回答中引用事实时，必须标注 fact_id，格式：[fact_id=N]。
+- 区分代码中已存在和这是我基于推理的建议。
+
+## 示例
+问：认证逻辑在哪里实现的？
+答：认证逻辑主要在以下文件中：
+- app/api/auth.py:25-45 定义了登录端点 [fact_id=12]
+- app/services/auth_service.py:10-80 实现了密码验证 [fact_id=15]
 """.strip()
 
 
 def rebuild_code_facts(connection: sqlite3.Connection) -> dict[str, Any]:
     generated_at = utc_now_iso()
-    facts = _build_facts_from_code(generated_at)
-    ai_repo.clear_facts(connection)
-    for fact in facts:
-        ai_repo.insert_fact(connection, **fact)
-    return {"fact_count": len(facts), "rebuilt_at": generated_at}
+    new_facts = _build_facts_from_code(generated_at)
+    new_hashes = {f["content_hash"] for f in new_facts}
+
+    existing_hashes = ai_repo.get_existing_hashes(connection)
+
+    # Insert new facts (hash not yet in DB)
+    inserted = 0
+    for fact in new_facts:
+        if fact["content_hash"] not in existing_hashes:
+            ai_repo.insert_fact(connection, **fact)
+            inserted += 1
+
+    # Remove stale facts (hash no longer in codebase)
+    stale_hashes = existing_hashes - new_hashes
+    if stale_hashes:
+        ai_repo.delete_facts_by_hashes(connection, stale_hashes)
+
+    return {
+        "fact_count": len(new_facts),
+        "new_facts": inserted,
+        "stale_removed": len(stale_hashes),
+        "rebuilt_at": generated_at,
+    }
 
 
 def ensure_code_facts_ready(connection: sqlite3.Connection, settings: Settings) -> None:
@@ -81,6 +116,11 @@ def answer_code_question(
         question=normalized_question,
     )
     facts = retrieve_code_facts(connection, normalized_question, limit=settings.ai_rag_top_k)
+    facts = truncate_facts_to_budget(
+        facts,
+        max_tokens=settings.ai_rag_max_context_tokens,
+        question=normalized_question,
+    )
     fact_ids = [int(fact["id"]) for fact in facts]
     created_at = utc_now_iso()
     user_message = ai_repo.insert_message(
@@ -92,13 +132,22 @@ def answer_code_question(
         created_at=created_at,
     )
 
+    # Load history and build multi-turn messages
+    history = ai_repo.list_messages(connection, int(session["id"]))
+    user_prompt = _build_user_prompt(normalized_question, facts)
+    messages = build_messages_with_history(
+        system_prompt=SYSTEM_PROMPT,
+        user_prompt=user_prompt,
+        history_messages=[m for m in history if m["id"] != user_message["id"]],
+        max_turns=settings.ai_chat_history_max_turns,
+    )
+
     started_at = time.perf_counter()
     try:
         answer = chat_with_ollama(
             base_url=settings.ollama_base_url,
             model=settings.ai_chat_model,
-            system_prompt=SYSTEM_PROMPT,
-            user_prompt=_build_user_prompt(normalized_question, facts),
+            messages=messages,
         )
     except OllamaError as exc:
         duration_ms = int((time.perf_counter() - started_at) * 1000)
@@ -181,6 +230,11 @@ def stream_code_question_events(
             question=normalized_question,
         )
         facts = retrieve_code_facts(connection, normalized_question, limit=settings.ai_rag_top_k)
+        facts = truncate_facts_to_budget(
+            facts,
+            max_tokens=settings.ai_rag_max_context_tokens,
+            question=normalized_question,
+        )
         fact_ids = [int(fact["id"]) for fact in facts]
         user_message = ai_repo.insert_message(
             connection,
@@ -204,13 +258,22 @@ def stream_code_question_events(
         )
         yield sse_event("sources", {"sources": sources})
 
+        # Load history and build multi-turn messages
+        history = ai_repo.list_messages(connection, int(session["id"]))
+        user_prompt = _build_user_prompt(normalized_question, facts)
+        messages = build_messages_with_history(
+            system_prompt=SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            history_messages=[m for m in history if m["id"] != user_message["id"]],
+            max_turns=settings.ai_chat_history_max_turns,
+        )
+
         answer_parts: list[str] = []
         thinking_parts: list[str] = []
         for event in stream_chat_with_ollama(
             base_url=settings.ollama_base_url,
             model=settings.ai_chat_model,
-            system_prompt=SYSTEM_PROMPT,
-            user_prompt=_build_user_prompt(normalized_question, facts),
+            messages=messages,
             thinking_enabled=thinking_enabled,
         ):
             if event["type"] == "thinking_delta":
@@ -302,15 +365,31 @@ def sse_event(event: str, data: dict[str, Any]) -> str:
 
 
 def retrieve_code_facts(connection: sqlite3.Connection, question: str, *, limit: int) -> list[dict[str, Any]]:
+    over_limit = limit * 2
+    all_facts: list[dict[str, Any]] = []
+
     match_query = _to_fts_query(question)
     if match_query:
         try:
-            facts = ai_repo.search_facts(connection, match_query, limit=limit)
-            if facts:
-                return facts
+            all_facts = ai_repo.search_facts(connection, match_query, limit=over_limit)
         except sqlite3.Error:
             pass
-    return ai_repo.list_recent_facts(connection, limit=limit)
+
+    # Try synonym-expanded queries as supplementary
+    extra_queries = expand_query_rule_based(question)
+    for eq in extra_queries:
+        try:
+            extra = ai_repo.search_facts(connection, eq, limit=over_limit)
+            seen = {f["id"] for f in all_facts}
+            all_facts.extend(f for f in extra if f["id"] not in seen)
+        except sqlite3.Error:
+            continue
+
+    if not all_facts:
+        all_facts = ai_repo.list_recent_facts(connection, limit=over_limit)
+
+    # MMR diversity rerank: select top_k diverse and relevant facts
+    return mmr_rerank(all_facts, query=question, lambda_param=0.7, top_k=limit)
 
 
 def list_chat_sessions(
@@ -486,6 +565,7 @@ def _title_from_question(question: str) -> str:
 
 
 def _to_fts_query(question: str) -> str:
+    # Extract identifiers (including compound names) and CJK characters
     tokens = re.findall(r"[A-Za-z0-9_./:-]+|[\u4e00-\u9fff]", question)
     expanded: list[str] = []
     for token in tokens[:32]:
@@ -497,6 +577,10 @@ def _to_fts_query(question: str) -> str:
 
 def _build_user_prompt(question: str, facts: list[dict[str, Any]]) -> str:
     if facts:
+        scores = [float(f.get("score", 0)) for f in facts]
+        avg_score = sum(scores) / len(scores) if scores else 0.0
+        confidence = "高置信度" if avg_score < -2.0 else "近似匹配"
+        header = f"RAG 代码片段（{confidence}）："
         context = "\n\n".join(
             (
                 f"[fact_id={fact['id']}] {fact['source_file_path']}:{fact['start_line']}-{fact['end_line']}"
@@ -505,8 +589,9 @@ def _build_user_prompt(question: str, facts: list[dict[str, Any]]) -> str:
             for fact in facts
         )
     else:
+        header = "RAG 代码片段："
         context = "没有检索到相关代码事实。"
-    return f"用户问题：{question}\n\nRAG 代码片段：\n{context}\n\n请根据以上代码事实回答。"
+    return f"用户问题：{question}\n\n{header}\n{context}\n\n请根据以上代码事实回答。请在回答中引用文件路径、行号范围以及所使用的 fact_id。"
 
 
 def _source_from_fact(fact: dict[str, Any]) -> dict[str, Any]:

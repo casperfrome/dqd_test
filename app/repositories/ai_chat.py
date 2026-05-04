@@ -15,6 +15,25 @@ def get_latest_fact_updated_at(connection: sqlite3.Connection) -> str | None:
     return str(row["updated_at"]) if row and row["updated_at"] else None
 
 
+def get_existing_hashes(connection: sqlite3.Connection) -> set[str]:
+    rows = connection.execute("SELECT content_hash FROM ai_database_facts").fetchall()
+    return {str(row["content_hash"]) for row in rows}
+
+
+def delete_facts_by_hashes(connection: sqlite3.Connection, hashes: set[str]) -> None:
+    if not hashes:
+        return
+    placeholders = ",".join("?" for _ in hashes)
+    connection.execute(
+        f"DELETE FROM ai_database_fact_fts WHERE rowid IN (SELECT id FROM ai_database_facts WHERE content_hash IN ({placeholders}))",
+        tuple(hashes),
+    )
+    connection.execute(
+        f"DELETE FROM ai_database_facts WHERE content_hash IN ({placeholders})",
+        tuple(hashes),
+    )
+
+
 def clear_facts(connection: sqlite3.Connection) -> None:
     connection.execute("DELETE FROM ai_database_fact_fts")
     connection.execute("DELETE FROM ai_database_facts")

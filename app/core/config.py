@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     ai_chat_model: str = Field(default="qwen3:8b", alias="AI_CHAT_MODEL")
     ai_fact_refresh_ttl_seconds: int = Field(default=300, alias="AI_FACT_REFRESH_TTL_SECONDS")
     ai_rag_top_k: int = Field(default=8, alias="AI_RAG_TOP_K")
+    ai_rag_max_context_tokens: int = Field(default=4000, alias="AI_RAG_MAX_CONTEXT_TOKENS")
+    ai_chat_history_max_turns: int = Field(default=5, alias="AI_CHAT_HISTORY_MAX_TURNS")
 
     model_config = SettingsConfigDict(
         env_file=ROOT_DIR / ".env",
